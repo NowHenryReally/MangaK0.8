@@ -1,0 +1,28 @@
+{
+  "name": "mangak0.8",
+  "version": "1.0.0",
+  "description": "Paperback 0.8 extension for MangaK.io",
+  "main": "index.js",
+  "scripts": {
+    "build": "paperback-cli bundle",
+    "serve": "paperback-cli serve",
+    "dev": "paperback-cli serve --watch",
+    "tsc": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/NowHenryReally/MangaK0.8.git"
+  },
+  "keywords": [],
+  "author": "YourName",
+  "license": "ISC",
+  "devDependencies": {
+    "@paperback/toolchain": "0.8.7",
+    "@paperback/types": "0.8.7",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0",
+    "paperback-extensions-common": "^5.0.0-alpha.7"
+  }
+}
