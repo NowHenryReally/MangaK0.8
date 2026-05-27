@@ -463,7 +463,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MangaK = exports.MangaKInfo = void 0;
 const types_1 = require("@paperback/types");
 exports.MangaKInfo = {
-    version: '1.0.3',
+    version: '1.0.4',
     name: 'MangaK',
     icon: 'icon.png',
     author: 'NowHenryReally',
@@ -481,8 +481,16 @@ class MangaK extends types_1.Source {
         super(...arguments);
         this.requestManager = App.createRequestManager({
             requestsPerSecond: 3,
-            requestTimeout: 15000,
+            requestTimeout: 20000,
         });
+    }
+    apiHeaders() {
+        return {
+            'Origin': BASE_URL,
+            'Referer': BASE_URL + '/',
+            'Accept': 'application/json, text/plain, */*',
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        };
     }
     getMangaShareUrl(mangaId) {
         return `${BASE_URL}/${mangaId}`;
@@ -495,21 +503,20 @@ class MangaK extends types_1.Source {
         try {
             const nextData = JSON.parse($('#__NEXT_DATA__').text());
             const pp = nextData?.props?.pageProps ?? {};
+            if (pp.mangaHsid)
+                return pp.mangaHsid;
+            if (pp.initialManga?.id)
+                return pp.initialManga.id;
             const manga = pp?.manga ?? pp?.title ?? pp?.comic ?? pp?.series;
             if (manga?.id)
                 return manga.id;
-            for (const val of Object.values(pp)) {
-                const v = val;
-                if (v && typeof v === 'object' && v.slug === slug && v.id) {
-                    return v.id;
-                }
-            }
         }
         catch { /* fall through */ }
         const shortQuery = slug.split('-').slice(0, 4).join(' ');
         const searchReq = App.createRequest({
             url: `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
             method: 'GET',
+            headers: this.apiHeaders(),
         });
         const searchRes = await this.requestManager.schedule(searchReq, 1);
         const json = JSON.parse(searchRes.data);
@@ -521,19 +528,34 @@ class MangaK extends types_1.Source {
     }
     // ── Manga Details ──────────────────────────────────────────────────────────
     async getMangaDetails(mangaId) {
-        const shortQuery = mangaId.split('-').slice(0, 4).join(' ');
-        const searchReq = App.createRequest({
-            url: `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
-            method: 'GET',
-        });
-        const searchRes = await this.requestManager.schedule(searchReq, 1);
-        const json = JSON.parse(searchRes.data);
-        const items = json?.data?.items ?? [];
-        const details = items.find((i) => i.slug === mangaId) ?? items[0] ?? {};
+        // Scrape manga page directly — initialManga in __NEXT_DATA__ has everything
+        const request = App.createRequest({ url: `${BASE_URL}/${mangaId}`, method: 'GET' });
+        const response = await this.requestManager.schedule(request, 1);
+        const $ = this.cheerio.load(response.data);
+        let details = {};
+        try {
+            const nextData = JSON.parse($('#__NEXT_DATA__').text());
+            details = nextData?.props?.pageProps?.initialManga ?? {};
+        }
+        catch { /* fall through */ }
+        // Fallback to search API if initialManga not found
+        if (!details.name) {
+            const shortQuery = mangaId.split('-').slice(0, 4).join(' ');
+            const searchReq = App.createRequest({
+                url: `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
+                method: 'GET',
+                headers: this.apiHeaders(),
+            });
+            const searchRes = await this.requestManager.schedule(searchReq, 1);
+            const json = JSON.parse(searchRes.data);
+            const items = json?.data?.items ?? [];
+            details = items.find((i) => i.slug === mangaId) ?? items[0] ?? {};
+        }
         const title = details?.name ?? mangaId;
         const cover = details?.cover ?? '';
-        const desc = details?.summary ?? '';
+        const desc = details?.summary ?? details?.description ?? '';
         const status = (details?.status ?? '').toLowerCase().includes('completed') ? '1' : '0';
+        const author = details?.author ?? '';
         const genres = (details?.genres ?? []).map((g) => {
             const label = typeof g === 'string' ? g : (g.name ?? '');
             return App.createTag({ id: label.toLowerCase(), label });
@@ -547,7 +569,7 @@ class MangaK extends types_1.Source {
                 titles: [title],
                 image: cover,
                 desc,
-                author: '',
+                author,
                 status,
                 tags: tagSections,
             }),
@@ -559,6 +581,7 @@ class MangaK extends types_1.Source {
         const request = App.createRequest({
             url: `${API_URL}/titles/${id}/chapters?cv=0`,
             method: 'GET',
+            headers: this.apiHeaders(),
         });
         const response = await this.requestManager.schedule(request, 1);
         const json = JSON.parse(response.data);
@@ -566,10 +589,10 @@ class MangaK extends types_1.Source {
         const chapters = [];
         items.forEach((item, index) => {
             const urlParts = item.url.replace(/^\//, '').split('/');
-            // Store internal ID and slug separated by | so getChapterDetails can use both
             const slugPart = urlParts.slice(1).join('/');
             if (!slugPart)
                 return;
+            // Store internal ID and slug separated by | so getChapterDetails can use both
             const chapterId = `${item.id}|${slugPart}`;
             const chapNum = typeof item.chapter_number === 'number'
                 ? item.chapter_number
@@ -590,20 +613,35 @@ class MangaK extends types_1.Source {
     // ── Chapter Details ────────────────────────────────────────────────────────
     async getChapterDetails(mangaId, chapterId) {
         // chapterId format: "{internalChapterId}|{slug}"
-        const [internalChapterId] = chapterId.split('|');
-        const titleId = await this.resolveId(mangaId);
-        const request = App.createRequest({
-            url: `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
+        const parts = chapterId.split('|');
+        const internalChapterId = parts[0];
+        const slugPart = parts.slice(1).join('|');
+        // First try: scrape __NEXT_DATA__ from chapter page (SSR has images)
+        const pageReq = App.createRequest({
+            url: `${BASE_URL}/${mangaId}/${slugPart}`,
             method: 'GET',
         });
-        const response = await this.requestManager.schedule(request, 1);
-        const json = JSON.parse(response.data);
-        const pages = json?.data?.chapter?.images ?? [];
-        return App.createChapterDetails({
-            id: chapterId,
-            mangaId,
-            pages,
+        const pageRes = await this.requestManager.schedule(pageReq, 1);
+        const $ = this.cheerio.load(pageRes.data);
+        try {
+            const nextData = JSON.parse($('#__NEXT_DATA__').text());
+            const images = nextData?.props?.pageProps?.initialChapter?.images ?? [];
+            if (images.length > 0) {
+                return App.createChapterDetails({ id: chapterId, mangaId, pages: images });
+            }
+        }
+        catch { /* fall through */ }
+        // Fallback: use API
+        const titleId = await this.resolveId(mangaId);
+        const apiReq = App.createRequest({
+            url: `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
+            method: 'GET',
+            headers: this.apiHeaders(),
         });
+        const apiRes = await this.requestManager.schedule(apiReq, 1);
+        const json = JSON.parse(apiRes.data);
+        const pages = json?.data?.chapter?.images ?? [];
+        return App.createChapterDetails({ id: chapterId, mangaId, pages });
     }
     // ── Search ─────────────────────────────────────────────────────────────────
     async getSearchResults(query, metadata) {
@@ -612,6 +650,7 @@ class MangaK extends types_1.Source {
         const request = App.createRequest({
             url: `${API_URL}/titles/search?q=${term}&page=${page}&limit=24`,
             method: 'GET',
+            headers: this.apiHeaders(),
         });
         const response = await this.requestManager.schedule(request, 1);
         const json = JSON.parse(response.data);
@@ -644,25 +683,55 @@ class MangaK extends types_1.Source {
         });
         sectionCallback(latestSection);
         sectionCallback(popularSection);
-        const latestReq = App.createRequest({
-            url: `${API_URL}/titles/search?sort=latest&page=1&limit=24`,
-            method: 'GET',
-        });
-        const latestRes = await this.requestManager.schedule(latestReq, 1);
-        const latestJson = JSON.parse(latestRes.data);
-        latestSection.items = (latestJson?.data?.items ?? []).map((item) => App.createPartialSourceManga({
+        // Fallback: scrape homepage __NEXT_DATA__ if API unreachable
+        const homeReq = App.createRequest({ url: `${BASE_URL}/home`, method: 'GET' });
+        const homeRes = await this.requestManager.schedule(homeReq, 1);
+        const homeHtml = homeRes.data;
+        const $home = this.cheerio.load(homeHtml);
+        let latestItems = [];
+        let popularItems = [];
+        try {
+            const nextData = JSON.parse($home('#__NEXT_DATA__').text());
+            const pp = nextData?.props?.pageProps ?? {};
+            latestItems = pp?.latest?.items ?? [];
+            popularItems = pp?.popularItems ?? [];
+        }
+        catch { /* ignore */ }
+        // Try API for latest if scrape failed
+        if (latestItems.length === 0) {
+            try {
+                const latestReq = App.createRequest({
+                    url: `${API_URL}/titles/search?sort=latest&page=1&limit=24`,
+                    method: 'GET',
+                    headers: this.apiHeaders(),
+                });
+                const latestRes = await this.requestManager.schedule(latestReq, 1);
+                const latestJson = JSON.parse(latestRes.data);
+                latestItems = latestJson?.data?.items ?? [];
+            }
+            catch { /* ignore */ }
+        }
+        // Try API for popular if scrape failed
+        if (popularItems.length === 0) {
+            try {
+                const popReq = App.createRequest({
+                    url: `${API_URL}/titles/search?sort=views&page=1&limit=24`,
+                    method: 'GET',
+                    headers: this.apiHeaders(),
+                });
+                const popRes = await this.requestManager.schedule(popReq, 1);
+                const popJson = JSON.parse(popRes.data);
+                popularItems = popJson?.data?.items ?? [];
+            }
+            catch { /* ignore */ }
+        }
+        latestSection.items = latestItems.map((item) => App.createPartialSourceManga({
             mangaId: item.slug,
             title: item.name,
             image: item.cover ?? '',
         }));
         sectionCallback(latestSection);
-        const popReq = App.createRequest({
-            url: `${API_URL}/titles/search?sort=views&page=1&limit=24`,
-            method: 'GET',
-        });
-        const popRes = await this.requestManager.schedule(popReq, 1);
-        const popJson = JSON.parse(popRes.data);
-        popularSection.items = (popJson?.data?.items ?? []).map((item) => App.createPartialSourceManga({
+        popularSection.items = popularItems.map((item) => App.createPartialSourceManga({
             mangaId: item.slug,
             title: item.name,
             image: item.cover ?? '',
@@ -680,6 +749,7 @@ class MangaK extends types_1.Source {
         const request = App.createRequest({
             url: `${API_URL}/titles/search?sort=${sort}&page=${page}&limit=24`,
             method: 'GET',
+            headers: this.apiHeaders(),
         });
         const response = await this.requestManager.schedule(request, 1);
         const json = JSON.parse(response.data);
