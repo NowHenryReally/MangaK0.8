@@ -146,7 +146,7 @@ export class MangaK extends Source {
             }))
         })
 
-        return chapters
+        return chapters.reverse()
     }
 
     // ── Chapter Details ────────────────────────────────────────────────────────

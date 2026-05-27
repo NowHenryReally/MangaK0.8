@@ -578,7 +578,7 @@ class MangaK extends types_1.Source {
                 sortingIndex: index,
             }));
         });
-        return chapters;
+        return chapters.reverse();
     }
     // ── Chapter Details ────────────────────────────────────────────────────────
     async getChapterDetails(mangaId, chapterId) {
