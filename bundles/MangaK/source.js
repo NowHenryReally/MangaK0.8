@@ -463,7 +463,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MangaK = exports.MangaKInfo = void 0;
 const types_1 = require("@paperback/types");
 exports.MangaKInfo = {
-    version: '1.0.4',
+    version: '1.0.6',
     name: 'MangaK',
     icon: 'icon.png',
     author: 'NowHenryReally',
@@ -528,7 +528,6 @@ class MangaK extends types_1.Source {
     }
     // ── Manga Details ──────────────────────────────────────────────────────────
     async getMangaDetails(mangaId) {
-        // Scrape manga page directly — initialManga in __NEXT_DATA__ has everything
         const request = App.createRequest({ url: `${BASE_URL}/${mangaId}`, method: 'GET' });
         const response = await this.requestManager.schedule(request, 1);
         const $ = this.cheerio.load(response.data);
@@ -538,7 +537,6 @@ class MangaK extends types_1.Source {
             details = nextData?.props?.pageProps?.initialManga ?? {};
         }
         catch { /* fall through */ }
-        // Fallback to search API if initialManga not found
         if (!details.name) {
             const shortQuery = mangaId.split('-').slice(0, 4).join(' ');
             const searchReq = App.createRequest({
@@ -592,7 +590,6 @@ class MangaK extends types_1.Source {
             const slugPart = urlParts.slice(1).join('/');
             if (!slugPart)
                 return;
-            // Store internal ID and slug separated by | so getChapterDetails can use both
             const chapterId = `${item.id}|${slugPart}`;
             const chapNum = typeof item.chapter_number === 'number'
                 ? item.chapter_number
@@ -622,14 +619,14 @@ class MangaK extends types_1.Source {
         });
         const pageRes = await this.requestManager.schedule(pageReq, 1);
         const $ = this.cheerio.load(pageRes.data);
-        let images = [];
+        let pages = [];
         try {
             const nextData = JSON.parse($('#__NEXT_DATA__').text());
-            images = nextData?.props?.pageProps?.initialChapter?.images ?? [];
+            pages = nextData?.props?.pageProps?.initialChapter?.images ?? [];
         }
         catch { /* fall through */ }
         // Fallback: use API
-        if (images.length === 0) {
+        if (pages.length === 0) {
             const titleId = await this.resolveId(mangaId);
             const apiReq = App.createRequest({
                 url: `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
@@ -638,20 +635,9 @@ class MangaK extends types_1.Source {
             });
             const apiRes = await this.requestManager.schedule(apiReq, 1);
             const json = JSON.parse(apiRes.data);
-            images = json?.data?.chapter?.images ?? [];
+            pages = json?.data?.chapter?.images ?? [];
         }
-        // Paperback 0.8 supports setting image request headers via App.createRequestObject
-        // Wrap each image URL with a Referer header
-        const pages = images.map((url) => App.createRequestObject({
-            url,
-            method: 'GET',
-            headers: { 'Referer': BASE_URL + '/' },
-        }));
-        return App.createChapterDetails({
-            id: chapterId,
-            mangaId,
-            pages: pages,
-        });
+        return App.createChapterDetails({ id: chapterId, mangaId, pages });
     }
     // ── Search ─────────────────────────────────────────────────────────────────
     async getSearchResults(query, metadata) {
@@ -693,11 +679,9 @@ class MangaK extends types_1.Source {
         });
         sectionCallback(latestSection);
         sectionCallback(popularSection);
-        // Fallback: scrape homepage __NEXT_DATA__ if API unreachable
         const homeReq = App.createRequest({ url: `${BASE_URL}/home`, method: 'GET' });
         const homeRes = await this.requestManager.schedule(homeReq, 1);
-        const homeHtml = homeRes.data;
-        const $home = this.cheerio.load(homeHtml);
+        const $home = this.cheerio.load(homeRes.data);
         let latestItems = [];
         let popularItems = [];
         try {
@@ -707,7 +691,6 @@ class MangaK extends types_1.Source {
             popularItems = pp?.popularItems ?? [];
         }
         catch { /* ignore */ }
-        // Try API for latest if scrape failed
         if (latestItems.length === 0) {
             try {
                 const latestReq = App.createRequest({
@@ -716,12 +699,10 @@ class MangaK extends types_1.Source {
                     headers: this.apiHeaders(),
                 });
                 const latestRes = await this.requestManager.schedule(latestReq, 1);
-                const latestJson = JSON.parse(latestRes.data);
-                latestItems = latestJson?.data?.items ?? [];
+                latestItems = JSON.parse(latestRes.data)?.data?.items ?? [];
             }
             catch { /* ignore */ }
         }
-        // Try API for popular if scrape failed
         if (popularItems.length === 0) {
             try {
                 const popReq = App.createRequest({
@@ -730,8 +711,7 @@ class MangaK extends types_1.Source {
                     headers: this.apiHeaders(),
                 });
                 const popRes = await this.requestManager.schedule(popReq, 1);
-                const popJson = JSON.parse(popRes.data);
-                popularItems = popJson?.data?.items ?? [];
+                popularItems = JSON.parse(popRes.data)?.data?.items ?? [];
             }
             catch { /* ignore */ }
         }

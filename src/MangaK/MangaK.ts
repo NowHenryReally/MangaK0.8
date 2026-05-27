@@ -16,7 +16,7 @@ import {
 } from '@paperback/types'
 
 export const MangaKInfo: SourceInfo = {
-    version:        '1.0.4',
+    version:        '1.0.6',
     name:           'MangaK',
     icon:           'icon.png',
     author:         'NowHenryReally',
@@ -85,7 +85,6 @@ export class MangaK extends Source {
     // ── Manga Details ──────────────────────────────────────────────────────────
 
     override async getMangaDetails(mangaId: string): Promise<SourceManga> {
-        // Scrape manga page directly — initialManga in __NEXT_DATA__ has everything
         const request  = App.createRequest({ url: `${BASE_URL}/${mangaId}`, method: 'GET' })
         const response = await this.requestManager.schedule(request, 1)
         const $        = this.cheerio.load(response.data as string)
@@ -96,7 +95,6 @@ export class MangaK extends Source {
             details = nextData?.props?.pageProps?.initialManga ?? {}
         } catch { /* fall through */ }
 
-        // Fallback to search API if initialManga not found
         if (!details.name) {
             const shortQuery = mangaId.split('-').slice(0, 4).join(' ')
             const searchReq  = App.createRequest({
@@ -157,7 +155,6 @@ export class MangaK extends Source {
             const urlParts  = (item.url as string).replace(/^\//, '').split('/')
             const slugPart  = urlParts.slice(1).join('/')
             if (!slugPart) return
-            // Store internal ID and slug separated by | so getChapterDetails can use both
             const chapterId = `${item.id}|${slugPart}`
 
             const chapNum = typeof item.chapter_number === 'number'
@@ -187,22 +184,22 @@ export class MangaK extends Source {
         const slugPart          = parts.slice(1).join('|')
 
         // Try scraping __NEXT_DATA__ from chapter page first
-        const pageReq  = App.createRequest({
+        const pageReq = App.createRequest({
             url:    `${BASE_URL}/${mangaId}/${slugPart}`,
             method: 'GET',
         })
         const pageRes = await this.requestManager.schedule(pageReq, 1)
         const $       = this.cheerio.load(pageRes.data as string)
 
-        let images: string[] = []
+        let pages: string[] = []
 
         try {
             const nextData = JSON.parse($('#__NEXT_DATA__').text())
-            images = nextData?.props?.pageProps?.initialChapter?.images ?? []
+            pages = nextData?.props?.pageProps?.initialChapter?.images ?? []
         } catch { /* fall through */ }
 
         // Fallback: use API
-        if (images.length === 0) {
+        if (pages.length === 0) {
             const titleId = await this.resolveId(mangaId)
             const apiReq  = App.createRequest({
                 url:     `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
@@ -211,24 +208,10 @@ export class MangaK extends Source {
             })
             const apiRes = await this.requestManager.schedule(apiReq, 1)
             const json   = JSON.parse(apiRes.data as string)
-            images = json?.data?.chapter?.images ?? []
+            pages = json?.data?.chapter?.images ?? []
         }
 
-        // Paperback 0.8 supports setting image request headers via App.createRequestObject
-        // Wrap each image URL with a Referer header
-        const pages = images.map((url: string) =>
-            App.createRequestObject({
-                url,
-                method: 'GET',
-                headers: { 'Referer': BASE_URL + '/' },
-            })
-        )
-
-        return App.createChapterDetails({
-            id:      chapterId,
-            mangaId,
-            pages:   pages as any,
-        })
+        return App.createChapterDetails({ id: chapterId, mangaId, pages })
     }
 
     // ── Search ─────────────────────────────────────────────────────────────────
@@ -282,23 +265,20 @@ export class MangaK extends Source {
         sectionCallback(latestSection)
         sectionCallback(popularSection)
 
-        // Fallback: scrape homepage __NEXT_DATA__ if API unreachable
         const homeReq  = App.createRequest({ url: `${BASE_URL}/home`, method: 'GET' })
         const homeRes  = await this.requestManager.schedule(homeReq, 1)
-        const homeHtml = homeRes.data as string
-        const $home    = this.cheerio.load(homeHtml)
+        const $home    = this.cheerio.load(homeRes.data as string)
 
         let latestItems: any[]  = []
         let popularItems: any[] = []
 
         try {
-            const nextData   = JSON.parse($home('#__NEXT_DATA__').text())
-            const pp         = nextData?.props?.pageProps ?? {}
+            const nextData = JSON.parse($home('#__NEXT_DATA__').text())
+            const pp       = nextData?.props?.pageProps ?? {}
             latestItems  = pp?.latest?.items ?? []
             popularItems = pp?.popularItems ?? []
         } catch { /* ignore */ }
 
-        // Try API for latest if scrape failed
         if (latestItems.length === 0) {
             try {
                 const latestReq  = App.createRequest({
@@ -307,12 +287,10 @@ export class MangaK extends Source {
                     headers: this.apiHeaders(),
                 })
                 const latestRes  = await this.requestManager.schedule(latestReq, 1)
-                const latestJson = JSON.parse(latestRes.data as string)
-                latestItems = latestJson?.data?.items ?? []
+                latestItems = JSON.parse(latestRes.data as string)?.data?.items ?? []
             } catch { /* ignore */ }
         }
 
-        // Try API for popular if scrape failed
         if (popularItems.length === 0) {
             try {
                 const popReq  = App.createRequest({
@@ -321,8 +299,7 @@ export class MangaK extends Source {
                     headers: this.apiHeaders(),
                 })
                 const popRes  = await this.requestManager.schedule(popReq, 1)
-                const popJson = JSON.parse(popRes.data as string)
-                popularItems = popJson?.data?.items ?? []
+                popularItems = JSON.parse(popRes.data as string)?.data?.items ?? []
             } catch { /* ignore */ }
         }
 
