@@ -16,7 +16,7 @@ import {
 } from '@paperback/types'
 
 export const MangaKInfo: SourceInfo = {
-    version:        '1.0.2',
+    version:        '1.0.3',
     name:           'MangaK',
     icon:           'icon.png',
     author:         'NowHenryReally',
@@ -45,7 +45,6 @@ export class MangaK extends Source {
     // ── Resolve slug → internal ID ─────────────────────────────────────────────
 
     private async resolveId(slug: string): Promise<string> {
-        // First try scraping the manga page __NEXT_DATA__
         const request  = App.createRequest({ url: `${BASE_URL}/${slug}`, method: 'GET' })
         const response = await this.requestManager.schedule(request, 1)
         const $        = this.cheerio.load(response.data as string)
@@ -64,7 +63,6 @@ export class MangaK extends Source {
             }
         } catch { /* fall through */ }
 
-        // Fallback: search API with shortened slug
         const shortQuery = slug.split('-').slice(0, 4).join(' ')
         const searchReq  = App.createRequest({
             url:    `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
@@ -134,9 +132,11 @@ export class MangaK extends Source {
         const chapters: Chapter[] = []
 
         items.forEach((item: any, index: number) => {
-            const urlParts  = (item.url as string).replace(/^\//, '').split('/')
-            const chapterId = urlParts.slice(1).join('/')
-            if (!chapterId) return
+            const urlParts = (item.url as string).replace(/^\//, '').split('/')
+            // Store internal ID and slug separated by | so getChapterDetails can use both
+            const slugPart  = urlParts.slice(1).join('/')
+            if (!slugPart) return
+            const chapterId = `${item.id}|${slugPart}`
 
             const chapNum = typeof item.chapter_number === 'number'
                 ? item.chapter_number
@@ -145,7 +145,7 @@ export class MangaK extends Source {
             chapters.push(App.createChapter({
                 id:           chapterId,
                 chapNum,
-                name:         item.name ?? chapterId,
+                name:         item.name ?? slugPart,
                 langCode:     '🇬🇧',
                 time:         item.updated_at ? new Date(item.updated_at) : new Date(),
                 sortingIndex: index,
@@ -160,20 +160,17 @@ export class MangaK extends Source {
     // ── Chapter Details ────────────────────────────────────────────────────────
 
     override async getChapterDetails(mangaId: string, chapterId: string): Promise<ChapterDetails> {
-        const request = App.createRequest({
-            url:     `${BASE_URL}/${mangaId}/${chapterId}`,
-            method:  'GET',
-            headers: { 'Referer': BASE_URL },
+        // chapterId format: "{internalChapterId}|{slug}"
+        const [internalChapterId] = chapterId.split('|')
+        const titleId = await this.resolveId(mangaId)
+
+        const request  = App.createRequest({
+            url:    `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
+            method: 'GET',
         })
         const response = await this.requestManager.schedule(request, 1)
-        const $        = this.cheerio.load(response.data as string)
-
-        const pages: string[] = []
-
-        $('#images img').each((_: number, el: any) => {
-            const src = ($(el).attr('src') ?? '').trim()
-            if (src && !src.startsWith('data:')) pages.push(src)
-        })
+        const json     = JSON.parse(response.data as string)
+        const pages: string[] = json?.data?.chapter?.images ?? []
 
         return App.createChapterDetails({
             id:      chapterId,
