@@ -463,7 +463,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MangaK = exports.MangaKInfo = void 0;
 const types_1 = require("@paperback/types");
 exports.MangaKInfo = {
-    version: '1.0.10',
+    version: '1.0.11',
     name: 'MangaK',
     icon: 'icon.png',
     author: 'NowHenryReally',
@@ -505,6 +505,18 @@ class MangaK extends types_1.Source {
     getMangaShareUrl(mangaId) {
         return `${BASE_URL}/${mangaId}`;
     }
+    slugToQueries(slug) {
+        const words = slug.split('-');
+        const longWords = words.filter(w => w.length > 1);
+        return [
+            slug.replace(/-/g, ' '), // a i doctor
+            slug.replace(/-/g, '.'), // a.i.doctor
+            longWords.join(' '), // doctor (skip single-letter words)
+            words.slice(0, 4).join(' '), // first 4 words
+            words.slice(0, 2).join(' '), // first 2 words
+            longWords.slice(0, 4).join(' '), // first 4 long words
+        ].filter((q, i, arr) => q.trim() && arr.indexOf(q) === i); // deduplicate
+    }
     // ── Resolve slug → internal ID ─────────────────────────────────────────────
     async resolveId(slug) {
         const request = App.createRequest({ url: `${BASE_URL}/${slug}`, method: 'GET' });
@@ -522,13 +534,7 @@ class MangaK extends types_1.Source {
                 return manga.id;
         }
         catch { /* fall through */ }
-        // Try multiple query variations to find exact slug match
-        const queries = [
-            slug.replace(/-/g, ' '),
-            slug.split('-').slice(0, 4).join(' '),
-            slug.split('-').slice(0, 2).join(' '),
-        ];
-        for (const q of queries) {
+        for (const q of this.slugToQueries(slug)) {
             try {
                 const searchReq = App.createRequest({
                     url: `${API_URL}/titles/search?q=${encodeURIComponent(q)}&limit=20`,
@@ -558,12 +564,7 @@ class MangaK extends types_1.Source {
         }
         catch { /* fall through */ }
         if (!details.name) {
-            const queries = [
-                mangaId.replace(/-/g, ' '),
-                mangaId.split('-').slice(0, 4).join(' '),
-                mangaId.split('-').slice(0, 2).join(' '),
-            ];
-            for (const q of queries) {
+            for (const q of this.slugToQueries(mangaId)) {
                 try {
                     const searchReq = App.createRequest({
                         url: `${API_URL}/titles/search?q=${encodeURIComponent(q)}&limit=20`,
