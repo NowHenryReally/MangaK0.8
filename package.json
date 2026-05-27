@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Paperback 0.8 extension for MangaK.io",
   "main": "index.js",
+  "baseURL": "https://nowhenryreally.github.io/MangaK0.8",
   "scripts": {
     "build": "paperback-cli bundle",
     "serve": "paperback-cli serve",
