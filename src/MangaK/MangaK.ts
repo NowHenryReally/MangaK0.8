@@ -16,7 +16,7 @@ import {
 } from '@paperback/types'
 
 export const MangaKInfo: SourceInfo = {
-    version:        '1.0.8',
+    version:        '1.0.9',
     name:           'MangaK',
     icon:           'icon.png',
     author:         'NowHenryReally',
@@ -31,6 +31,11 @@ export const MangaKInfo: SourceInfo = {
 const BASE_URL  = 'https://mangak.io'
 const API_URL   = 'https://api.mangak.io'
 const PROXY_URL = 'https://mangak-proxy.stevenlam987.workers.dev'
+
+function parseChapNum(name: string, apiNum: number, fallback: number): number {
+    const m = (name ?? '').match(/(\d+(?:\.\d+)?)/)
+    return m ? parseFloat(m[1]!) : (apiNum ?? fallback)
+}
 
 export class MangaK extends Source {
 
@@ -163,9 +168,11 @@ export class MangaK extends Source {
             if (!slugPart) return
             const chapterId = `${item.id}|${slugPart}`
 
-            const chapNum = typeof item.chapter_number === 'number'
-                ? item.chapter_number
-                : index + 1
+            const chapNum = parseChapNum(
+                item.name ?? '',
+                item.chapter_number,
+                index + 1
+            )
 
             chapters.push(App.createChapter({
                 id:           chapterId,
