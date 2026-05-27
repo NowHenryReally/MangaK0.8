@@ -463,7 +463,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MangaK = exports.MangaKInfo = void 0;
 const types_1 = require("@paperback/types");
 exports.MangaKInfo = {
-    version: '1.0.7',
+    version: '1.0.8',
     name: 'MangaK',
     icon: 'icon.png',
     author: 'NowHenryReally',
@@ -494,6 +494,8 @@ class MangaK extends types_1.Source {
         };
     }
     proxyImage(url) {
+        if (!url)
+            return url;
         return `${PROXY_URL}?url=${encodeURIComponent(url)}`;
     }
     getMangaShareUrl(mangaId) {
@@ -554,7 +556,7 @@ class MangaK extends types_1.Source {
             details = items.find((i) => i.slug === mangaId) ?? items[0] ?? {};
         }
         const title = details?.name ?? mangaId;
-        const cover = details?.cover ?? '';
+        const cover = this.proxyImage(details?.cover ?? '');
         const desc = details?.summary ?? details?.description ?? '';
         const status = (details?.status ?? '').toLowerCase().includes('completed') ? '1' : '0';
         const author = details?.author ?? '';
@@ -616,7 +618,6 @@ class MangaK extends types_1.Source {
         const parts = chapterId.split('|');
         const internalChapterId = parts[0];
         const slugPart = parts.slice(1).join('|');
-        // Try scraping __NEXT_DATA__ from chapter page first
         const pageReq = App.createRequest({
             url: `${BASE_URL}/${mangaId}/${slugPart}`,
             method: 'GET',
@@ -629,7 +630,6 @@ class MangaK extends types_1.Source {
             images = nextData?.props?.pageProps?.initialChapter?.images ?? [];
         }
         catch { /* fall through */ }
-        // Fallback: use API
         if (images.length === 0) {
             const titleId = await this.resolveId(mangaId);
             const apiReq = App.createRequest({
@@ -641,7 +641,6 @@ class MangaK extends types_1.Source {
             const json = JSON.parse(apiRes.data);
             images = json?.data?.chapter?.images ?? [];
         }
-        // Proxy all image URLs through Cloudflare Worker to add Referer header
         const pages = images.map((url) => this.proxyImage(url));
         return App.createChapterDetails({ id: chapterId, mangaId, pages });
     }
@@ -660,7 +659,7 @@ class MangaK extends types_1.Source {
         const results = items.map((item) => App.createPartialSourceManga({
             mangaId: item.slug,
             title: item.name,
-            image: item.cover ?? '',
+            image: this.proxyImage(item.cover ?? ''),
         }));
         const pagination = json?.data?.pagination ?? {};
         const hasNext = pagination.has_next ?? false;
@@ -724,13 +723,13 @@ class MangaK extends types_1.Source {
         latestSection.items = latestItems.map((item) => App.createPartialSourceManga({
             mangaId: item.slug,
             title: item.name,
-            image: item.cover ?? '',
+            image: this.proxyImage(item.cover ?? ''),
         }));
         sectionCallback(latestSection);
         popularSection.items = popularItems.map((item) => App.createPartialSourceManga({
             mangaId: item.slug,
             title: item.name,
-            image: item.cover ?? '',
+            image: this.proxyImage(item.cover ?? ''),
         }));
         sectionCallback(popularSection);
     }
@@ -753,7 +752,7 @@ class MangaK extends types_1.Source {
         const results = items.map((item) => App.createPartialSourceManga({
             mangaId: item.slug,
             title: item.name,
-            image: item.cover ?? '',
+            image: this.proxyImage(item.cover ?? ''),
         }));
         const hasNext = json?.data?.pagination?.has_next ?? false;
         return App.createPagedResults({

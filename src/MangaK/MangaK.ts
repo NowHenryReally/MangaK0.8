@@ -16,7 +16,7 @@ import {
 } from '@paperback/types'
 
 export const MangaKInfo: SourceInfo = {
-    version:        '1.0.7',
+    version:        '1.0.8',
     name:           'MangaK',
     icon:           'icon.png',
     author:         'NowHenryReally',
@@ -49,6 +49,7 @@ export class MangaK extends Source {
     }
 
     private proxyImage(url: string): string {
+        if (!url) return url
         return `${PROXY_URL}?url=${encodeURIComponent(url)}`
     }
 
@@ -114,7 +115,7 @@ export class MangaK extends Source {
         }
 
         const title  = details?.name ?? mangaId
-        const cover  = details?.cover ?? ''
+        const cover  = this.proxyImage(details?.cover ?? '')
         const desc   = details?.summary ?? details?.description ?? ''
         const status = (details?.status ?? '').toLowerCase().includes('completed') ? '1' : '0'
         const author = details?.author ?? ''
@@ -188,7 +189,6 @@ export class MangaK extends Source {
         const internalChapterId = parts[0]!
         const slugPart          = parts.slice(1).join('|')
 
-        // Try scraping __NEXT_DATA__ from chapter page first
         const pageReq = App.createRequest({
             url:    `${BASE_URL}/${mangaId}/${slugPart}`,
             method: 'GET',
@@ -203,7 +203,6 @@ export class MangaK extends Source {
             images = nextData?.props?.pageProps?.initialChapter?.images ?? []
         } catch { /* fall through */ }
 
-        // Fallback: use API
         if (images.length === 0) {
             const titleId = await this.resolveId(mangaId)
             const apiReq  = App.createRequest({
@@ -216,9 +215,7 @@ export class MangaK extends Source {
             images = json?.data?.chapter?.images ?? []
         }
 
-        // Proxy all image URLs through Cloudflare Worker to add Referer header
         const pages = images.map((url: string) => this.proxyImage(url))
-
         return App.createChapterDetails({ id: chapterId, mangaId, pages })
     }
 
@@ -241,7 +238,7 @@ export class MangaK extends Source {
             App.createPartialSourceManga({
                 mangaId: item.slug,
                 title:   item.name,
-                image:   item.cover ?? '',
+                image:   this.proxyImage(item.cover ?? ''),
             })
         )
 
@@ -315,7 +312,7 @@ export class MangaK extends Source {
             App.createPartialSourceManga({
                 mangaId: item.slug,
                 title:   item.name,
-                image:   item.cover ?? '',
+                image:   this.proxyImage(item.cover ?? ''),
             })
         )
         sectionCallback(latestSection)
@@ -324,7 +321,7 @@ export class MangaK extends Source {
             App.createPartialSourceManga({
                 mangaId: item.slug,
                 title:   item.name,
-                image:   item.cover ?? '',
+                image:   this.proxyImage(item.cover ?? ''),
             })
         )
         sectionCallback(popularSection)
@@ -354,7 +351,7 @@ export class MangaK extends Source {
             App.createPartialSourceManga({
                 mangaId: item.slug,
                 title:   item.name,
-                image:   item.cover ?? '',
+                image:   this.proxyImage(item.cover ?? ''),
             })
         )
 
