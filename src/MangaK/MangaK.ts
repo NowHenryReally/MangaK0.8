@@ -15,13 +15,11 @@ import {
     SourceManga,
 } from '@paperback/types'
 
-// ─── Extension Info ───────────────────────────────────────────────────────────
-
 export const MangaKInfo: SourceInfo = {
-    version:        '1.0.0',
+    version:        '1.0.1',
     name:           'MangaK',
     icon:           'icon.png',
-    author:         'YourName',
+    author:         'NowHenryReally',
     authorWebsite:  'https://github.com/NowHenryReally',
     description:    'Extension for MangaK.io — manga, manhwa, and manhua.',
     contentRating:  ContentRating.MATURE,
@@ -31,20 +29,7 @@ export const MangaKInfo: SourceInfo = {
 }
 
 const BASE_URL = 'https://mangak.io'
-
-interface MangaKItem {
-    slug:   string
-    name:   string
-    cover:  string
-    status: string
-}
-
-function parseChapterNum(slug: string, fallback: number): number {
-    const m = slug.match(/(\d+)(?:-(\d+))?(?!.*\d)/)
-    return m ? parseFloat(`${m[1]!}${m[2] ? '.' + m[2] : ''}`) : fallback
-}
-
-// ─── Extension Class ──────────────────────────────────────────────────────────
+const API_URL  = 'https://api.mangak.io'
 
 export class MangaK extends Source {
 
@@ -57,29 +42,56 @@ export class MangaK extends Source {
         return `${BASE_URL}/${mangaId}`
     }
 
-    // ── Manga Details ──────────────────────────────────────────────────────────
-
-    override async getMangaDetails(mangaId: string): Promise<SourceManga> {
+    // Resolve slug to internal ID via search API
+    private async resolveId(slug: string): Promise<string> {
         const request = App.createRequest({
-            url:    `${BASE_URL}/${mangaId}`,
+            url:    `${API_URL}/titles/search?q=${encodeURIComponent(slug)}&limit=5`,
             method: 'GET',
         })
         const response = await this.requestManager.schedule(request, 1)
-        const $        = this.cheerio.load(response.data as string)
+        const json     = JSON.parse(response.data as string)
+        const items    = json?.data?.items ?? []
+        // Find exact slug match
+        const match = items.find((i: any) => i.slug === slug) ?? items[0]
+        if (!match) throw new Error(`Could not resolve ID for slug: ${slug}`)
+        return match.id as string
+    }
 
-        // ↓ Adjust these selectors after inspecting the title page DOM in DevTools
-        const titles     = [$('h1.series-title, h1.entry-title').first().text().trim() || mangaId]
-        const image      = $('img.series-cover, .thumb img').first().attr('src') ?? ''
-        const desc       = $('.series-summary, .summary__content').first().text().trim()
-        const author     = $('.author-name, .artist-name').first().text().trim()
-        const statusText = $('.status, .series-status').first().text().toLowerCase()
-        const status     = statusText.includes('completed') ? '1' : '0'
+    // ── Manga Details ──────────────────────────────────────────────────────────
 
-        const genres: Tag[] = []
-        // ↓ Adjust genre selector in DevTools
-        $('.genres a, .genre-item').each((_: number, el: any) => {
-            const label = $(el).text().trim()
-            if (label) genres.push(App.createTag({ id: label.toLowerCase(), label }))
+    override async getMangaDetails(mangaId: string): Promise<SourceManga> {
+        const id      = await this.resolveId(mangaId)
+        const request = App.createRequest({
+            url:    `${API_URL}/meta/manga/${id}`,
+            method: 'GET',
+        })
+        const response = await this.requestManager.schedule(request, 1)
+        const json     = JSON.parse(response.data as string)
+        const data     = json?.data ?? {}
+
+        // Also fetch from HTML for cover/desc fallback
+        const htmlReq  = App.createRequest({ url: `${BASE_URL}/${mangaId}`, method: 'GET' })
+        const htmlRes  = await this.requestManager.schedule(htmlReq, 1)
+        const $        = this.cheerio.load(htmlRes.data as string)
+
+        let nextData: any = {}
+        try {
+            nextData = JSON.parse($('#__NEXT_DATA__').text())
+        } catch { /* ignore */ }
+
+        // Try to get manga info from __NEXT_DATA__ on the manga page
+        const pp      = nextData?.props?.pageProps ?? {}
+        const details = pp?.manga ?? pp?.title ?? data
+
+        const title  = details?.name  ?? details?.title  ?? mangaId
+        const cover  = details?.cover ?? details?.image  ?? ''
+        const desc   = details?.summary ?? details?.description ?? ''
+        const status = (details?.status ?? '').toLowerCase().includes('completed') ? '1' : '0'
+        const author = details?.author ?? ''
+
+        const genres: Tag[] = (details?.genres ?? []).map((g: any) => {
+            const label = typeof g === 'string' ? g : (g.name ?? '')
+            return App.createTag({ id: label.toLowerCase(), label })
         })
 
         const tagSections: TagSection[] = genres.length
@@ -89,12 +101,12 @@ export class MangaK extends Source {
         return App.createSourceManga({
             id:        mangaId,
             mangaInfo: App.createMangaInfo({
-                titles,
-                image,
+                titles: [title],
+                image:  cover,
                 desc,
                 author,
                 status,
-                tags: tagSections,
+                tags:   tagSections,
             }),
         })
     }
@@ -102,50 +114,42 @@ export class MangaK extends Source {
     // ── Chapter List ───────────────────────────────────────────────────────────
 
     override async getChapters(mangaId: string): Promise<Chapter[]> {
+        const id      = await this.resolveId(mangaId)
         const request = App.createRequest({
-            url:    `${BASE_URL}/${mangaId}`,
+            url:    `${API_URL}/titles/${id}/chapters?cv=0`,
             method: 'GET',
         })
         const response = await this.requestManager.schedule(request, 1)
-        const $        = this.cheerio.load(response.data as string)
+        const json     = JSON.parse(response.data as string)
+        const items: any[] = json?.data?.chapters ?? []
 
         const chapters: Chapter[] = []
 
-        // ↓ Adjust selector to match the actual chapter list rows in DevTools
-        $('.chapter-list li, .chapters-list .wp-manga-chapter').each(
-            (index: number, el: any) => {
-                const anchor = $(el).find('a').first()
-                const href   = anchor.attr('href') ?? ''
-                const name   = anchor.text().trim()
+        items.forEach((item: any, index: number) => {
+            // url is like /eleceed/chapter-403 or /eleceed/special-396-5-special
+            const urlParts  = (item.url as string).replace(/^\//, '').split('/')
+            // chapterId is everything after the manga slug
+            const chapterId = urlParts.slice(1).join('/')
+            if (!chapterId) return
 
-                const chapterId = href
-                    .replace(`/${mangaId}/`, '')
-                    .replace(/\/$/, '')
+            const chapNum = typeof item.chapter_number === 'number'
+                ? item.chapter_number
+                : index + 1
 
-                const chapNum = parseChapterNum(chapterId, index + 1)
+            chapters.push(App.createChapter({
+                id:           chapterId,
+                chapNum,
+                name:         item.name ?? chapterId,
+                langCode:     '🇬🇧',
+                time:         item.updated_at ? new Date(item.updated_at) : new Date(),
+                sortingIndex: index,
+            }))
+        })
 
-                // ↓ Adjust date selector if present
-                const dateText = $(el).find('.chapter-date, .chapter-time').text().trim()
-                const time     = dateText ? new Date(dateText) : new Date()
-
-                if (chapterId) {
-                    chapters.push(App.createChapter({
-                        id:           chapterId,
-                        chapNum,
-                        name,
-                        langCode:     '🇬🇧',
-                        time,
-                        sortingIndex: index,
-                    }))
-                }
-            }
-        )
-
-        return chapters.reverse()
+        return chapters
     }
 
     // ── Chapter Details ────────────────────────────────────────────────────────
-    // CONFIRMED from DOM: images live in #images, plain src, no lazy loading
 
     override async getChapterDetails(mangaId: string, chapterId: string): Promise<ChapterDetails> {
         const request = App.createRequest({
@@ -176,37 +180,27 @@ export class MangaK extends Source {
         const term = encodeURIComponent(query.title ?? '')
 
         const request = App.createRequest({
-            url:    `${BASE_URL}/search?q=${term}&page=${page}`,
+            url:    `${API_URL}/titles/search?q=${term}&page=${page}&limit=24`,
             method: 'GET',
         })
         const response = await this.requestManager.schedule(request, 1)
-        const $        = this.cheerio.load(response.data as string)
+        const json     = JSON.parse(response.data as string)
+        const items: any[] = json?.data?.items ?? []
 
-        const results: PartialSourceManga[] = []
-
-        // ↓ Adjust selector to match search result cards in DevTools
-        $('.c-tabs-item__content, .search-results .manga-item, .c-image-hover').each(
-            (_: number, el: any) => {
-                const anchor  = $(el).find('a').first()
-                const href    = anchor.attr('href') ?? ''
-                const mangaId = href.replace(BASE_URL, '').replace(/^\/|\/$/g, '')
-                const title   = $(el).find('.post-title h3, .title').text().trim()
-                const image   =
-                    $(el).find('img').attr('src') ??
-                    $(el).find('img').attr('data-src') ??
-                    ''
-
-                if (mangaId && title) {
-                    results.push(App.createPartialSourceManga({ mangaId, title, image }))
-                }
-            }
+        const results: PartialSourceManga[] = items.map((item: any) =>
+            App.createPartialSourceManga({
+                mangaId: item.slug,
+                title:   item.name,
+                image:   item.cover ?? '',
+            })
         )
 
-        const hasNextPage = !!$('a.next, .nav-links .next').length
+        const pagination = json?.data?.pagination ?? {}
+        const hasNext    = pagination.has_next ?? false
 
         return App.createPagedResults({
             results,
-            metadata: hasNextPage ? { page: page + 1 } : undefined,
+            metadata: hasNext ? { page: page + 1 } : undefined,
         })
     }
 
@@ -229,58 +223,41 @@ export class MangaK extends Source {
         sectionCallback(latestSection)
         sectionCallback(popularSection)
 
-        const response = await this.requestManager.schedule(
-            App.createRequest({ url: `${BASE_URL}/home`, method: 'GET' }),
-            1
-        )
-        const $ = this.cheerio.load(response.data as string)
+        // Latest
+        const latestReq = App.createRequest({
+            url:    `${API_URL}/titles/search?sort=latest&page=1&limit=24`,
+            method: 'GET',
+        })
+        const latestRes  = await this.requestManager.schedule(latestReq, 1)
+        const latestJson = JSON.parse(latestRes.data as string)
+        const latestItems: any[] = latestJson?.data?.items ?? []
 
-        try {
-            const nextData = JSON.parse($('#__NEXT_DATA__').text()) as {
-                props: {
-                    pageProps: {
-                        latest?:       { items: MangaKItem[] }
-                        popularItems?: MangaKItem[]
-                    }
-                }
-            }
-            const pp = nextData.props.pageProps
-
-            latestSection.items = (pp.latest?.items ?? []).map((item: MangaKItem) =>
-                App.createPartialSourceManga({
-                    mangaId: item.slug,
-                    title:   item.name,
-                    image:   item.cover,
-                })
-            )
-            sectionCallback(latestSection)
-
-            popularSection.items = (pp.popularItems ?? []).map((item: MangaKItem) =>
-                App.createPartialSourceManga({
-                    mangaId: item.slug,
-                    title:   item.name,
-                    image:   item.cover,
-                })
-            )
-            sectionCallback(popularSection)
-
-        } catch {
-            // Fallback HTML scrape
-            const items: PartialSourceManga[] = []
-            $('article.group').each((_: number, el: any) => {
-                const anchor  = $(el).find('a').first()
-                const mangaId = (anchor.attr('href') ?? '').replace(/^\/|\/$/g, '')
-                const title   = $(el).find('h3').text().trim()
-                const image   = $(el).find('img').attr('src') ?? ''
-                if (mangaId && title) {
-                    items.push(App.createPartialSourceManga({ mangaId, title, image }))
-                }
+        latestSection.items = latestItems.map((item: any) =>
+            App.createPartialSourceManga({
+                mangaId: item.slug,
+                title:   item.name,
+                image:   item.cover ?? '',
             })
-            latestSection.items  = items
-            popularSection.items = items
-            sectionCallback(latestSection)
-            sectionCallback(popularSection)
-        }
+        )
+        sectionCallback(latestSection)
+
+        // Popular/Trending
+        const popReq = App.createRequest({
+            url:    `${API_URL}/titles/search?sort=views&page=1&limit=24`,
+            method: 'GET',
+        })
+        const popRes  = await this.requestManager.schedule(popReq, 1)
+        const popJson = JSON.parse(popRes.data as string)
+        const popItems: any[] = popJson?.data?.items ?? []
+
+        popularSection.items = popItems.map((item: any) =>
+            App.createPartialSourceManga({
+                mangaId: item.slug,
+                title:   item.name,
+                image:   item.cover ?? '',
+            })
+        )
+        sectionCallback(popularSection)
     }
 
     // ── View More ──────────────────────────────────────────────────────────────
@@ -288,58 +265,32 @@ export class MangaK extends Source {
     override async getViewMoreItems(homepageSectionId: string, metadata: any): Promise<PagedResults> {
         const page = metadata?.page ?? 1
 
-        const urlMap: Record<string, string> = {
-            latest:  `${BASE_URL}/latest?page=${page}`,
-            popular: `${BASE_URL}/ranking?page=${page}`,
+        const sortMap: Record<string, string> = {
+            latest:  'latest',
+            popular: 'views',
         }
+        const sort = sortMap[homepageSectionId] ?? 'latest'
 
-        const url = urlMap[homepageSectionId]
-        if (!url) return App.createPagedResults({ results: [] })
+        const request = App.createRequest({
+            url:    `${API_URL}/titles/search?sort=${sort}&page=${page}&limit=24`,
+            method: 'GET',
+        })
+        const response = await this.requestManager.schedule(request, 1)
+        const json     = JSON.parse(response.data as string)
+        const items: any[] = json?.data?.items ?? []
 
-        const response = await this.requestManager.schedule(
-            App.createRequest({ url, method: 'GET' }),
-            1
+        const results: PartialSourceManga[] = items.map((item: any) =>
+            App.createPartialSourceManga({
+                mangaId: item.slug,
+                title:   item.name,
+                image:   item.cover ?? '',
+            })
         )
-        const $ = this.cheerio.load(response.data as string)
-        const results: PartialSourceManga[] = []
 
-        try {
-            const nextData = JSON.parse($('#__NEXT_DATA__').text()) as {
-                props: {
-                    pageProps: {
-                        latest?: { items: MangaKItem[]; pagination?: { has_next: boolean } }
-                        items?:  MangaKItem[]
-                    }
-                }
-            }
-            const pp    = nextData.props.pageProps
-            const items = pp.latest?.items ?? pp.items ?? []
-
-            for (const item of items) {
-                results.push(App.createPartialSourceManga({
-                    mangaId: item.slug,
-                    title:   item.name,
-                    image:   item.cover,
-                }))
-            }
-
-            const hasNext = pp.latest?.pagination?.has_next ?? false
-            return App.createPagedResults({
-                results,
-                metadata: hasNext ? { page: page + 1 } : undefined,
-            })
-
-        } catch {
-            $('article.group').each((_: number, el: any) => {
-                const anchor  = $(el).find('a').first()
-                const mangaId = (anchor.attr('href') ?? '').replace(/^\/|\/$/g, '')
-                const title   = $(el).find('h3').text().trim()
-                const image   = $(el).find('img').attr('src') ?? ''
-                if (mangaId && title) {
-                    results.push(App.createPartialSourceManga({ mangaId, title, image }))
-                }
-            })
-            return App.createPagedResults({ results })
-        }
+        const hasNext = json?.data?.pagination?.has_next ?? false
+        return App.createPagedResults({
+            results,
+            metadata: hasNext ? { page: page + 1 } : undefined,
+        })
     }
 }
