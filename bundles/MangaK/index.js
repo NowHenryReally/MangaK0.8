@@ -612,36 +612,46 @@ class MangaK extends types_1.Source {
     }
     // ── Chapter Details ────────────────────────────────────────────────────────
     async getChapterDetails(mangaId, chapterId) {
-        // chapterId format: "{internalChapterId}|{slug}"
         const parts = chapterId.split('|');
         const internalChapterId = parts[0];
         const slugPart = parts.slice(1).join('|');
-        // First try: scrape __NEXT_DATA__ from chapter page (SSR has images)
+        // Try scraping __NEXT_DATA__ from chapter page first
         const pageReq = App.createRequest({
             url: `${BASE_URL}/${mangaId}/${slugPart}`,
             method: 'GET',
         });
         const pageRes = await this.requestManager.schedule(pageReq, 1);
         const $ = this.cheerio.load(pageRes.data);
+        let images = [];
         try {
             const nextData = JSON.parse($('#__NEXT_DATA__').text());
-            const images = nextData?.props?.pageProps?.initialChapter?.images ?? [];
-            if (images.length > 0) {
-                return App.createChapterDetails({ id: chapterId, mangaId, pages: images });
-            }
+            images = nextData?.props?.pageProps?.initialChapter?.images ?? [];
         }
         catch { /* fall through */ }
         // Fallback: use API
-        const titleId = await this.resolveId(mangaId);
-        const apiReq = App.createRequest({
-            url: `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
+        if (images.length === 0) {
+            const titleId = await this.resolveId(mangaId);
+            const apiReq = App.createRequest({
+                url: `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
+                method: 'GET',
+                headers: this.apiHeaders(),
+            });
+            const apiRes = await this.requestManager.schedule(apiReq, 1);
+            const json = JSON.parse(apiRes.data);
+            images = json?.data?.chapter?.images ?? [];
+        }
+        // Paperback 0.8 supports setting image request headers via App.createRequestObject
+        // Wrap each image URL with a Referer header
+        const pages = images.map((url) => App.createRequestObject({
+            url,
             method: 'GET',
-            headers: this.apiHeaders(),
+            headers: { 'Referer': BASE_URL + '/' },
+        }));
+        return App.createChapterDetails({
+            id: chapterId,
+            mangaId,
+            pages: pages,
         });
-        const apiRes = await this.requestManager.schedule(apiReq, 1);
-        const json = JSON.parse(apiRes.data);
-        const pages = json?.data?.chapter?.images ?? [];
-        return App.createChapterDetails({ id: chapterId, mangaId, pages });
     }
     // ── Search ─────────────────────────────────────────────────────────────────
     async getSearchResults(query, metadata) {
