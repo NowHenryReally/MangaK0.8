@@ -16,7 +16,7 @@ import {
 } from '@paperback/types'
 
 export const MangaKInfo: SourceInfo = {
-    version:        '1.0.1',
+    version:        '1.0.2',
     name:           'MangaK',
     icon:           'icon.png',
     author:         'NowHenryReally',
@@ -42,52 +42,60 @@ export class MangaK extends Source {
         return `${BASE_URL}/${mangaId}`
     }
 
-    // Resolve slug to internal ID via search API
+    // ── Resolve slug → internal ID ─────────────────────────────────────────────
+
     private async resolveId(slug: string): Promise<string> {
-        const request = App.createRequest({
-            url:    `${API_URL}/titles/search?q=${encodeURIComponent(slug)}&limit=5`,
+        // First try scraping the manga page __NEXT_DATA__
+        const request  = App.createRequest({ url: `${BASE_URL}/${slug}`, method: 'GET' })
+        const response = await this.requestManager.schedule(request, 1)
+        const $        = this.cheerio.load(response.data as string)
+
+        try {
+            const nextData = JSON.parse($('#__NEXT_DATA__').text())
+            const pp       = nextData?.props?.pageProps ?? {}
+            const manga    = pp?.manga ?? pp?.title ?? pp?.comic ?? pp?.series
+            if (manga?.id) return manga.id as string
+
+            for (const val of Object.values(pp)) {
+                const v = val as any
+                if (v && typeof v === 'object' && v.slug === slug && v.id) {
+                    return v.id as string
+                }
+            }
+        } catch { /* fall through */ }
+
+        // Fallback: search API with shortened slug
+        const shortQuery = slug.split('-').slice(0, 4).join(' ')
+        const searchReq  = App.createRequest({
+            url:    `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
             method: 'GET',
         })
-        const response = await this.requestManager.schedule(request, 1)
-        const json     = JSON.parse(response.data as string)
-        const items    = json?.data?.items ?? []
-        // Find exact slug match
-        const match = items.find((i: any) => i.slug === slug) ?? items[0]
-        if (!match) throw new Error(`Could not resolve ID for slug: ${slug}`)
-        return match.id as string
+        const searchRes = await this.requestManager.schedule(searchReq, 1)
+        const json      = JSON.parse(searchRes.data as string)
+        const items     = json?.data?.items ?? []
+        const match     = items.find((i: any) => i.slug === slug)
+        if (match) return match.id as string
+
+        throw new Error(`Could not resolve ID for slug: ${slug}`)
     }
 
     // ── Manga Details ──────────────────────────────────────────────────────────
 
     override async getMangaDetails(mangaId: string): Promise<SourceManga> {
-        const id      = await this.resolveId(mangaId)
-        const request = App.createRequest({
-            url:    `${API_URL}/meta/manga/${id}`,
+        const shortQuery = mangaId.split('-').slice(0, 4).join(' ')
+        const searchReq  = App.createRequest({
+            url:    `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
             method: 'GET',
         })
-        const response = await this.requestManager.schedule(request, 1)
-        const json     = JSON.parse(response.data as string)
-        const data     = json?.data ?? {}
+        const searchRes = await this.requestManager.schedule(searchReq, 1)
+        const json      = JSON.parse(searchRes.data as string)
+        const items     = json?.data?.items ?? []
+        const details   = items.find((i: any) => i.slug === mangaId) ?? items[0] ?? {}
 
-        // Also fetch from HTML for cover/desc fallback
-        const htmlReq  = App.createRequest({ url: `${BASE_URL}/${mangaId}`, method: 'GET' })
-        const htmlRes  = await this.requestManager.schedule(htmlReq, 1)
-        const $        = this.cheerio.load(htmlRes.data as string)
-
-        let nextData: any = {}
-        try {
-            nextData = JSON.parse($('#__NEXT_DATA__').text())
-        } catch { /* ignore */ }
-
-        // Try to get manga info from __NEXT_DATA__ on the manga page
-        const pp      = nextData?.props?.pageProps ?? {}
-        const details = pp?.manga ?? pp?.title ?? data
-
-        const title  = details?.name  ?? details?.title  ?? mangaId
-        const cover  = details?.cover ?? details?.image  ?? ''
-        const desc   = details?.summary ?? details?.description ?? ''
+        const title  = details?.name ?? mangaId
+        const cover  = details?.cover ?? ''
+        const desc   = details?.summary ?? ''
         const status = (details?.status ?? '').toLowerCase().includes('completed') ? '1' : '0'
-        const author = details?.author ?? ''
 
         const genres: Tag[] = (details?.genres ?? []).map((g: any) => {
             const label = typeof g === 'string' ? g : (g.name ?? '')
@@ -104,7 +112,7 @@ export class MangaK extends Source {
                 titles: [title],
                 image:  cover,
                 desc,
-                author,
+                author: '',
                 status,
                 tags:   tagSections,
             }),
@@ -126,9 +134,7 @@ export class MangaK extends Source {
         const chapters: Chapter[] = []
 
         items.forEach((item: any, index: number) => {
-            // url is like /eleceed/chapter-403 or /eleceed/special-396-5-special
             const urlParts  = (item.url as string).replace(/^\//, '').split('/')
-            // chapterId is everything after the manga slug
             const chapterId = urlParts.slice(1).join('/')
             if (!chapterId) return
 
@@ -146,15 +152,18 @@ export class MangaK extends Source {
             }))
         })
 
-        return chapters.reverse()
+        chapters.sort((a, b) => a.chapNum - b.chapNum)
+        chapters.forEach((ch, i) => { ch.sortingIndex = i })
+        return chapters
     }
 
     // ── Chapter Details ────────────────────────────────────────────────────────
 
     override async getChapterDetails(mangaId: string, chapterId: string): Promise<ChapterDetails> {
         const request = App.createRequest({
-            url:    `${BASE_URL}/${mangaId}/${chapterId}`,
-            method: 'GET',
+            url:     `${BASE_URL}/${mangaId}/${chapterId}`,
+            method:  'GET',
+            headers: { 'Referer': BASE_URL },
         })
         const response = await this.requestManager.schedule(request, 1)
         const $        = this.cheerio.load(response.data as string)
@@ -223,16 +232,14 @@ export class MangaK extends Source {
         sectionCallback(latestSection)
         sectionCallback(popularSection)
 
-        // Latest
-        const latestReq = App.createRequest({
+        const latestReq  = App.createRequest({
             url:    `${API_URL}/titles/search?sort=latest&page=1&limit=24`,
             method: 'GET',
         })
         const latestRes  = await this.requestManager.schedule(latestReq, 1)
         const latestJson = JSON.parse(latestRes.data as string)
-        const latestItems: any[] = latestJson?.data?.items ?? []
 
-        latestSection.items = latestItems.map((item: any) =>
+        latestSection.items = (latestJson?.data?.items ?? []).map((item: any) =>
             App.createPartialSourceManga({
                 mangaId: item.slug,
                 title:   item.name,
@@ -241,16 +248,14 @@ export class MangaK extends Source {
         )
         sectionCallback(latestSection)
 
-        // Popular/Trending
-        const popReq = App.createRequest({
+        const popReq  = App.createRequest({
             url:    `${API_URL}/titles/search?sort=views&page=1&limit=24`,
             method: 'GET',
         })
         const popRes  = await this.requestManager.schedule(popReq, 1)
         const popJson = JSON.parse(popRes.data as string)
-        const popItems: any[] = popJson?.data?.items ?? []
 
-        popularSection.items = popItems.map((item: any) =>
+        popularSection.items = (popJson?.data?.items ?? []).map((item: any) =>
             App.createPartialSourceManga({
                 mangaId: item.slug,
                 title:   item.name,

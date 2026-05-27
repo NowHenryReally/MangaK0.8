@@ -463,7 +463,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MangaK = exports.MangaKInfo = void 0;
 const types_1 = require("@paperback/types");
 exports.MangaKInfo = {
-    version: '1.0.1',
+    version: '1.0.2',
     name: 'MangaK',
     icon: 'icon.png',
     author: 'NowHenryReally',
@@ -487,48 +487,55 @@ class MangaK extends types_1.Source {
     getMangaShareUrl(mangaId) {
         return `${BASE_URL}/${mangaId}`;
     }
-    // Resolve slug to internal ID via search API
+    // ── Resolve slug → internal ID ─────────────────────────────────────────────
     async resolveId(slug) {
-        const request = App.createRequest({
-            url: `${API_URL}/titles/search?q=${encodeURIComponent(slug)}&limit=5`,
+        // First try scraping the manga page __NEXT_DATA__
+        const request = App.createRequest({ url: `${BASE_URL}/${slug}`, method: 'GET' });
+        const response = await this.requestManager.schedule(request, 1);
+        const $ = this.cheerio.load(response.data);
+        try {
+            const nextData = JSON.parse($('#__NEXT_DATA__').text());
+            const pp = nextData?.props?.pageProps ?? {};
+            const manga = pp?.manga ?? pp?.title ?? pp?.comic ?? pp?.series;
+            if (manga?.id)
+                return manga.id;
+            for (const val of Object.values(pp)) {
+                const v = val;
+                if (v && typeof v === 'object' && v.slug === slug && v.id) {
+                    return v.id;
+                }
+            }
+        }
+        catch { /* fall through */ }
+        // Fallback: search API with shortened slug
+        const shortQuery = slug.split('-').slice(0, 4).join(' ');
+        const searchReq = App.createRequest({
+            url: `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
             method: 'GET',
         });
-        const response = await this.requestManager.schedule(request, 1);
-        const json = JSON.parse(response.data);
+        const searchRes = await this.requestManager.schedule(searchReq, 1);
+        const json = JSON.parse(searchRes.data);
         const items = json?.data?.items ?? [];
-        // Find exact slug match
-        const match = items.find((i) => i.slug === slug) ?? items[0];
-        if (!match)
-            throw new Error(`Could not resolve ID for slug: ${slug}`);
-        return match.id;
+        const match = items.find((i) => i.slug === slug);
+        if (match)
+            return match.id;
+        throw new Error(`Could not resolve ID for slug: ${slug}`);
     }
     // ── Manga Details ──────────────────────────────────────────────────────────
     async getMangaDetails(mangaId) {
-        const id = await this.resolveId(mangaId);
-        const request = App.createRequest({
-            url: `${API_URL}/meta/manga/${id}`,
+        const shortQuery = mangaId.split('-').slice(0, 4).join(' ');
+        const searchReq = App.createRequest({
+            url: `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
             method: 'GET',
         });
-        const response = await this.requestManager.schedule(request, 1);
-        const json = JSON.parse(response.data);
-        const data = json?.data ?? {};
-        // Also fetch from HTML for cover/desc fallback
-        const htmlReq = App.createRequest({ url: `${BASE_URL}/${mangaId}`, method: 'GET' });
-        const htmlRes = await this.requestManager.schedule(htmlReq, 1);
-        const $ = this.cheerio.load(htmlRes.data);
-        let nextData = {};
-        try {
-            nextData = JSON.parse($('#__NEXT_DATA__').text());
-        }
-        catch { /* ignore */ }
-        // Try to get manga info from __NEXT_DATA__ on the manga page
-        const pp = nextData?.props?.pageProps ?? {};
-        const details = pp?.manga ?? pp?.title ?? data;
-        const title = details?.name ?? details?.title ?? mangaId;
-        const cover = details?.cover ?? details?.image ?? '';
-        const desc = details?.summary ?? details?.description ?? '';
+        const searchRes = await this.requestManager.schedule(searchReq, 1);
+        const json = JSON.parse(searchRes.data);
+        const items = json?.data?.items ?? [];
+        const details = items.find((i) => i.slug === mangaId) ?? items[0] ?? {};
+        const title = details?.name ?? mangaId;
+        const cover = details?.cover ?? '';
+        const desc = details?.summary ?? '';
         const status = (details?.status ?? '').toLowerCase().includes('completed') ? '1' : '0';
-        const author = details?.author ?? '';
         const genres = (details?.genres ?? []).map((g) => {
             const label = typeof g === 'string' ? g : (g.name ?? '');
             return App.createTag({ id: label.toLowerCase(), label });
@@ -542,7 +549,7 @@ class MangaK extends types_1.Source {
                 titles: [title],
                 image: cover,
                 desc,
-                author,
+                author: '',
                 status,
                 tags: tagSections,
             }),
@@ -560,9 +567,7 @@ class MangaK extends types_1.Source {
         const items = json?.data?.chapters ?? [];
         const chapters = [];
         items.forEach((item, index) => {
-            // url is like /eleceed/chapter-403 or /eleceed/special-396-5-special
             const urlParts = item.url.replace(/^\//, '').split('/');
-            // chapterId is everything after the manga slug
             const chapterId = urlParts.slice(1).join('/');
             if (!chapterId)
                 return;
@@ -578,13 +583,16 @@ class MangaK extends types_1.Source {
                 sortingIndex: index,
             }));
         });
-        return chapters.reverse();
+        chapters.sort((a, b) => a.chapNum - b.chapNum);
+        chapters.forEach((ch, i) => { ch.sortingIndex = i; });
+        return chapters;
     }
     // ── Chapter Details ────────────────────────────────────────────────────────
     async getChapterDetails(mangaId, chapterId) {
         const request = App.createRequest({
             url: `${BASE_URL}/${mangaId}/${chapterId}`,
             method: 'GET',
+            headers: { 'Referer': BASE_URL },
         });
         const response = await this.requestManager.schedule(request, 1);
         const $ = this.cheerio.load(response.data);
@@ -639,29 +647,25 @@ class MangaK extends types_1.Source {
         });
         sectionCallback(latestSection);
         sectionCallback(popularSection);
-        // Latest
         const latestReq = App.createRequest({
             url: `${API_URL}/titles/search?sort=latest&page=1&limit=24`,
             method: 'GET',
         });
         const latestRes = await this.requestManager.schedule(latestReq, 1);
         const latestJson = JSON.parse(latestRes.data);
-        const latestItems = latestJson?.data?.items ?? [];
-        latestSection.items = latestItems.map((item) => App.createPartialSourceManga({
+        latestSection.items = (latestJson?.data?.items ?? []).map((item) => App.createPartialSourceManga({
             mangaId: item.slug,
             title: item.name,
             image: item.cover ?? '',
         }));
         sectionCallback(latestSection);
-        // Popular/Trending
         const popReq = App.createRequest({
             url: `${API_URL}/titles/search?sort=views&page=1&limit=24`,
             method: 'GET',
         });
         const popRes = await this.requestManager.schedule(popReq, 1);
         const popJson = JSON.parse(popRes.data);
-        const popItems = popJson?.data?.items ?? [];
-        popularSection.items = popItems.map((item) => App.createPartialSourceManga({
+        popularSection.items = (popJson?.data?.items ?? []).map((item) => App.createPartialSourceManga({
             mangaId: item.slug,
             title: item.name,
             image: item.cover ?? '',
