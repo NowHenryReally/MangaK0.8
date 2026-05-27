@@ -463,7 +463,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MangaK = exports.MangaKInfo = void 0;
 const types_1 = require("@paperback/types");
 exports.MangaKInfo = {
-    version: '1.0.8',
+    version: '1.0.10',
     name: 'MangaK',
     icon: 'icon.png',
     author: 'NowHenryReally',
@@ -477,6 +477,10 @@ exports.MangaKInfo = {
 const BASE_URL = 'https://mangak.io';
 const API_URL = 'https://api.mangak.io';
 const PROXY_URL = 'https://mangak-proxy.stevenlam987.workers.dev';
+function parseChapNum(name, apiNum, fallback) {
+    const m = (name ?? '').match(/(\d+(?:\.\d+)?)/);
+    return m ? parseFloat(m[1]) : (apiNum ?? fallback);
+}
 class MangaK extends types_1.Source {
     constructor() {
         super(...arguments);
@@ -518,18 +522,28 @@ class MangaK extends types_1.Source {
                 return manga.id;
         }
         catch { /* fall through */ }
-        const shortQuery = slug.split('-').slice(0, 4).join(' ');
-        const searchReq = App.createRequest({
-            url: `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
-            method: 'GET',
-            headers: this.apiHeaders(),
-        });
-        const searchRes = await this.requestManager.schedule(searchReq, 1);
-        const json = JSON.parse(searchRes.data);
-        const items = json?.data?.items ?? [];
-        const match = items.find((i) => i.slug === slug);
-        if (match)
-            return match.id;
+        // Try multiple query variations to find exact slug match
+        const queries = [
+            slug.replace(/-/g, ' '),
+            slug.split('-').slice(0, 4).join(' '),
+            slug.split('-').slice(0, 2).join(' '),
+        ];
+        for (const q of queries) {
+            try {
+                const searchReq = App.createRequest({
+                    url: `${API_URL}/titles/search?q=${encodeURIComponent(q)}&limit=20`,
+                    method: 'GET',
+                    headers: this.apiHeaders(),
+                });
+                const searchRes = await this.requestManager.schedule(searchReq, 1);
+                const json = JSON.parse(searchRes.data);
+                const items = json?.data?.items ?? [];
+                const match = items.find((i) => i.slug === slug);
+                if (match)
+                    return match.id;
+            }
+            catch { /* try next */ }
+        }
         throw new Error(`Could not resolve ID for slug: ${slug}`);
     }
     // ── Manga Details ──────────────────────────────────────────────────────────
@@ -544,16 +558,29 @@ class MangaK extends types_1.Source {
         }
         catch { /* fall through */ }
         if (!details.name) {
-            const shortQuery = mangaId.split('-').slice(0, 4).join(' ');
-            const searchReq = App.createRequest({
-                url: `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
-                method: 'GET',
-                headers: this.apiHeaders(),
-            });
-            const searchRes = await this.requestManager.schedule(searchReq, 1);
-            const json = JSON.parse(searchRes.data);
-            const items = json?.data?.items ?? [];
-            details = items.find((i) => i.slug === mangaId) ?? items[0] ?? {};
+            const queries = [
+                mangaId.replace(/-/g, ' '),
+                mangaId.split('-').slice(0, 4).join(' '),
+                mangaId.split('-').slice(0, 2).join(' '),
+            ];
+            for (const q of queries) {
+                try {
+                    const searchReq = App.createRequest({
+                        url: `${API_URL}/titles/search?q=${encodeURIComponent(q)}&limit=20`,
+                        method: 'GET',
+                        headers: this.apiHeaders(),
+                    });
+                    const searchRes = await this.requestManager.schedule(searchReq, 1);
+                    const json = JSON.parse(searchRes.data);
+                    const items = json?.data?.items ?? [];
+                    const match = items.find((i) => i.slug === mangaId);
+                    if (match) {
+                        details = match;
+                        break;
+                    }
+                }
+                catch { /* try next */ }
+            }
         }
         const title = details?.name ?? mangaId;
         const cover = this.proxyImage(details?.cover ?? '');
@@ -597,9 +624,7 @@ class MangaK extends types_1.Source {
             if (!slugPart)
                 return;
             const chapterId = `${item.id}|${slugPart}`;
-            const chapNum = typeof item.chapter_number === 'number'
-                ? item.chapter_number
-                : index + 1;
+            const chapNum = parseChapNum(item.name ?? '', item.chapter_number, index + 1);
             chapters.push(App.createChapter({
                 id: chapterId,
                 chapNum,

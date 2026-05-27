@@ -16,7 +16,7 @@ import {
 } from '@paperback/types'
 
 export const MangaKInfo: SourceInfo = {
-    version:        '1.0.9',
+    version:        '1.0.10',
     name:           'MangaK',
     icon:           'icon.png',
     author:         'NowHenryReally',
@@ -78,17 +78,27 @@ export class MangaK extends Source {
             if (manga?.id) return manga.id as string
         } catch { /* fall through */ }
 
-        const shortQuery = slug.split('-').slice(0, 4).join(' ')
-        const searchReq  = App.createRequest({
-            url:     `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
-            method:  'GET',
-            headers: this.apiHeaders(),
-        })
-        const searchRes = await this.requestManager.schedule(searchReq, 1)
-        const json      = JSON.parse(searchRes.data as string)
-        const items     = json?.data?.items ?? []
-        const match     = items.find((i: any) => i.slug === slug)
-        if (match) return match.id as string
+        // Try multiple query variations to find exact slug match
+        const queries = [
+            slug.replace(/-/g, ' '),
+            slug.split('-').slice(0, 4).join(' '),
+            slug.split('-').slice(0, 2).join(' '),
+        ]
+
+        for (const q of queries) {
+            try {
+                const searchReq = App.createRequest({
+                    url:     `${API_URL}/titles/search?q=${encodeURIComponent(q)}&limit=20`,
+                    method:  'GET',
+                    headers: this.apiHeaders(),
+                })
+                const searchRes = await this.requestManager.schedule(searchReq, 1)
+                const json      = JSON.parse(searchRes.data as string)
+                const items     = json?.data?.items ?? []
+                const match     = items.find((i: any) => i.slug === slug)
+                if (match) return match.id as string
+            } catch { /* try next */ }
+        }
 
         throw new Error(`Could not resolve ID for slug: ${slug}`)
     }
@@ -107,16 +117,25 @@ export class MangaK extends Source {
         } catch { /* fall through */ }
 
         if (!details.name) {
-            const shortQuery = mangaId.split('-').slice(0, 4).join(' ')
-            const searchReq  = App.createRequest({
-                url:     `${API_URL}/titles/search?q=${encodeURIComponent(shortQuery)}&limit=20`,
-                method:  'GET',
-                headers: this.apiHeaders(),
-            })
-            const searchRes = await this.requestManager.schedule(searchReq, 1)
-            const json      = JSON.parse(searchRes.data as string)
-            const items     = json?.data?.items ?? []
-            details = items.find((i: any) => i.slug === mangaId) ?? items[0] ?? {}
+            const queries = [
+                mangaId.replace(/-/g, ' '),
+                mangaId.split('-').slice(0, 4).join(' '),
+                mangaId.split('-').slice(0, 2).join(' '),
+            ]
+            for (const q of queries) {
+                try {
+                    const searchReq = App.createRequest({
+                        url:     `${API_URL}/titles/search?q=${encodeURIComponent(q)}&limit=20`,
+                        method:  'GET',
+                        headers: this.apiHeaders(),
+                    })
+                    const searchRes = await this.requestManager.schedule(searchReq, 1)
+                    const json      = JSON.parse(searchRes.data as string)
+                    const items     = json?.data?.items ?? []
+                    const match     = items.find((i: any) => i.slug === mangaId)
+                    if (match) { details = match; break }
+                } catch { /* try next */ }
+            }
         }
 
         const title  = details?.name ?? mangaId
