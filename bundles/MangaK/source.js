@@ -463,7 +463,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.MangaK = exports.MangaKInfo = void 0;
 const types_1 = require("@paperback/types");
 exports.MangaKInfo = {
-    version: '1.0.6',
+    version: '1.0.7',
     name: 'MangaK',
     icon: 'icon.png',
     author: 'NowHenryReally',
@@ -476,6 +476,7 @@ exports.MangaKInfo = {
 };
 const BASE_URL = 'https://mangak.io';
 const API_URL = 'https://api.mangak.io';
+const PROXY_URL = 'https://mangak-proxy.stevenlam987.workers.dev';
 class MangaK extends types_1.Source {
     constructor() {
         super(...arguments);
@@ -491,6 +492,9 @@ class MangaK extends types_1.Source {
             'Accept': 'application/json, text/plain, */*',
             'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
         };
+    }
+    proxyImage(url) {
+        return `${PROXY_URL}?url=${encodeURIComponent(url)}`;
     }
     getMangaShareUrl(mangaId) {
         return `${BASE_URL}/${mangaId}`;
@@ -619,14 +623,14 @@ class MangaK extends types_1.Source {
         });
         const pageRes = await this.requestManager.schedule(pageReq, 1);
         const $ = this.cheerio.load(pageRes.data);
-        let pages = [];
+        let images = [];
         try {
             const nextData = JSON.parse($('#__NEXT_DATA__').text());
-            pages = nextData?.props?.pageProps?.initialChapter?.images ?? [];
+            images = nextData?.props?.pageProps?.initialChapter?.images ?? [];
         }
         catch { /* fall through */ }
         // Fallback: use API
-        if (pages.length === 0) {
+        if (images.length === 0) {
             const titleId = await this.resolveId(mangaId);
             const apiReq = App.createRequest({
                 url: `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
@@ -635,8 +639,10 @@ class MangaK extends types_1.Source {
             });
             const apiRes = await this.requestManager.schedule(apiReq, 1);
             const json = JSON.parse(apiRes.data);
-            pages = json?.data?.chapter?.images ?? [];
+            images = json?.data?.chapter?.images ?? [];
         }
+        // Proxy all image URLs through Cloudflare Worker to add Referer header
+        const pages = images.map((url) => this.proxyImage(url));
         return App.createChapterDetails({ id: chapterId, mangaId, pages });
     }
     // ── Search ─────────────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@ import {
 } from '@paperback/types'
 
 export const MangaKInfo: SourceInfo = {
-    version:        '1.0.6',
+    version:        '1.0.7',
     name:           'MangaK',
     icon:           'icon.png',
     author:         'NowHenryReally',
@@ -28,8 +28,9 @@ export const MangaKInfo: SourceInfo = {
     intents:        SourceIntents.MANGA_CHAPTERS | SourceIntents.HOMEPAGE_SECTIONS,
 }
 
-const BASE_URL = 'https://mangak.io'
-const API_URL  = 'https://api.mangak.io'
+const BASE_URL  = 'https://mangak.io'
+const API_URL   = 'https://api.mangak.io'
+const PROXY_URL = 'https://mangak-proxy.stevenlam987.workers.dev'
 
 export class MangaK extends Source {
 
@@ -45,6 +46,10 @@ export class MangaK extends Source {
             'Accept':     'application/json, text/plain, */*',
             'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
         }
+    }
+
+    private proxyImage(url: string): string {
+        return `${PROXY_URL}?url=${encodeURIComponent(url)}`
     }
 
     override getMangaShareUrl(mangaId: string): string {
@@ -191,15 +196,15 @@ export class MangaK extends Source {
         const pageRes = await this.requestManager.schedule(pageReq, 1)
         const $       = this.cheerio.load(pageRes.data as string)
 
-        let pages: string[] = []
+        let images: string[] = []
 
         try {
             const nextData = JSON.parse($('#__NEXT_DATA__').text())
-            pages = nextData?.props?.pageProps?.initialChapter?.images ?? []
+            images = nextData?.props?.pageProps?.initialChapter?.images ?? []
         } catch { /* fall through */ }
 
         // Fallback: use API
-        if (pages.length === 0) {
+        if (images.length === 0) {
             const titleId = await this.resolveId(mangaId)
             const apiReq  = App.createRequest({
                 url:     `${API_URL}/titles/${titleId}/chapters/${internalChapterId}`,
@@ -208,8 +213,11 @@ export class MangaK extends Source {
             })
             const apiRes = await this.requestManager.schedule(apiReq, 1)
             const json   = JSON.parse(apiRes.data as string)
-            pages = json?.data?.chapter?.images ?? []
+            images = json?.data?.chapter?.images ?? []
         }
+
+        // Proxy all image URLs through Cloudflare Worker to add Referer header
+        const pages = images.map((url: string) => this.proxyImage(url))
 
         return App.createChapterDetails({ id: chapterId, mangaId, pages })
     }
@@ -265,9 +273,9 @@ export class MangaK extends Source {
         sectionCallback(latestSection)
         sectionCallback(popularSection)
 
-        const homeReq  = App.createRequest({ url: `${BASE_URL}/home`, method: 'GET' })
-        const homeRes  = await this.requestManager.schedule(homeReq, 1)
-        const $home    = this.cheerio.load(homeRes.data as string)
+        const homeReq = App.createRequest({ url: `${BASE_URL}/home`, method: 'GET' })
+        const homeRes = await this.requestManager.schedule(homeReq, 1)
+        const $home   = this.cheerio.load(homeRes.data as string)
 
         let latestItems: any[]  = []
         let popularItems: any[] = []
@@ -281,24 +289,24 @@ export class MangaK extends Source {
 
         if (latestItems.length === 0) {
             try {
-                const latestReq  = App.createRequest({
+                const latestReq = App.createRequest({
                     url:     `${API_URL}/titles/search?sort=latest&page=1&limit=24`,
                     method:  'GET',
                     headers: this.apiHeaders(),
                 })
-                const latestRes  = await this.requestManager.schedule(latestReq, 1)
+                const latestRes = await this.requestManager.schedule(latestReq, 1)
                 latestItems = JSON.parse(latestRes.data as string)?.data?.items ?? []
             } catch { /* ignore */ }
         }
 
         if (popularItems.length === 0) {
             try {
-                const popReq  = App.createRequest({
+                const popReq = App.createRequest({
                     url:     `${API_URL}/titles/search?sort=views&page=1&limit=24`,
                     method:  'GET',
                     headers: this.apiHeaders(),
                 })
-                const popRes  = await this.requestManager.schedule(popReq, 1)
+                const popRes = await this.requestManager.schedule(popReq, 1)
                 popularItems = JSON.parse(popRes.data as string)?.data?.items ?? []
             } catch { /* ignore */ }
         }
